@@ -4,7 +4,7 @@ import os
 import asyncio
 import json
 
-from copra.rest import Client
+from copra.rest import Client as RestClient
 
 
 async def main():
@@ -13,10 +13,10 @@ async def main():
 
     with open(args.creds, 'r') as f:
         creds = json.load(f)
-        client = Client(asyncio.get_event_loop(), auth=True, key=creds['apiKey'],
-                        secret=creds['apiSecret'], passphrase=creds['passPhrase'])
+        rest_client = RestClient(asyncio.get_event_loop(), auth=True, key=creds['apiKey'],
+                                 secret=creds['apiSecret'], passphrase=creds['passPhrase'])
 
-    print(await client.accounts())
+    print(await rest_client.accounts())
 
     if args.action == 'parser1':
         parser1()
@@ -25,7 +25,7 @@ async def main():
     else:
         args_parser.print_help()
 
-    await client.close()
+    await rest_client.close()
 
 
 def parser1():
