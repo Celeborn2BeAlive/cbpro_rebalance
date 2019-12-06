@@ -1,12 +1,22 @@
 import argparse
 import logging
 import os
+import asyncio
+import json
+
+from copra.rest import Client
 
 
-def main():
+async def main():
     args, args_parser = parse_cli_args()
     init_logging(args)
-    logging.log(logging.INFO, "Hello World")
+
+    with open(args.creds, 'r') as f:
+        creds = json.load(f)
+        client = Client(asyncio.get_event_loop(), auth=True, key=creds['apiKey'],
+                        secret=creds['apiSecret'], passphrase=creds['passPhrase'])
+
+    print(await client.accounts())
 
     if args.action == 'parser1':
         parser1()
@@ -14,6 +24,8 @@ def main():
         parser2()
     else:
         args_parser.print_help()
+
+    await client.close()
 
 
 def parser1():
@@ -47,6 +59,8 @@ def parse_cli_args():
 
     parser = argparse.ArgumentParser(description='Desc')
     parser.add_argument('-l', '--log-file', help='Path to log file.')
+    parser.add_argument(
+        '--creds', required=True, help='Path to json file containing credentials (apiKey, apiSecret, passPhrase)')
 
     commands = parser.add_subparsers(
         title='commands', dest='action')
@@ -65,4 +79,4 @@ def parse_cli_args():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
