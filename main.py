@@ -5,6 +5,7 @@ import os
 import asyncio
 import json
 import math
+from datetime import datetime
 from collections import defaultdict
 
 from copra.rest import Client as RestClient
@@ -24,6 +25,9 @@ async def main():
 
         QUOTE_CURRENCY = 'EUR'
 
+        time = datetime.now()
+        time_str = time.strftime('%Y-%m-%d-%H:%M:%S')
+
         def fun_with_graph():
             BANNED_CURRENCIES = ['USD']
 
@@ -38,64 +42,23 @@ async def main():
 
             print(products_graph.min_path('EUR', 'USDC'))
 
-        async def get_prices_dict(rest_client, portfolio):
-            prices = {}
-            for base_currency in portfolio:
-                await asyncio.sleep(0.2)
-                if base_currency == QUOTE_CURRENCY:
-                    prices[base_currency] = '1.0'
-                    continue
-                wanted_product_id = f'{base_currency}-{QUOTE_CURRENCY}'
-                if wanted_product_id in product_ids:
-                    prices[base_currency] = (await rest_client.ticker(f'{base_currency}-{QUOTE_CURRENCY}'))['price']
-                    continue
-                btc_product_id = f'{base_currency}-BTC'
-                if btc_product_id in product_ids:
-                    btc_price = float((await rest_client.ticker(btc_product_id))['price'])
-                else:
-                    btc_product_id = f'BTC-{base_currency}'
-                    btc_price = 1.0 / float((await rest_client.ticker(btc_product_id))['price'])
-
-                base_product_id = f'BTC-{QUOTE_CURRENCY}'
-                base_price = float((await rest_client.ticker(base_product_id))['price'])
-
-                prices[base_currency] = f'{(base_price * btc_price):.2}'
-            return prices
-
         if args.action == 'get-portfolio':
-            accounts = await rest_client.accounts()
-            portfolio = {item['currency']: item['balance']
-                         for item in accounts if float(item['balance']) != 0}
-            json_output(portfolio, args.out)
-
+            json_output({'time': time_str, 'portfolio': await get_portfolio(rest_client)}, args.out)
             return
 
         if args.action == 'get-allocations':
             with open(args.portfolio) as f:
-                portfolio = json.load(f)
-            prices = await get_prices_dict(rest_client, portfolio)
-            total = 0.0
-            values = {}
-            float_prices = {}
-            float_amount = {}
-            for base_currency in portfolio:
-                price = float(prices[base_currency])
-                float_prices[base_currency] = price
-                amount = float(portfolio[base_currency])
-                float_amount[base_currency] = amount
-                value = price * amount
-                values[base_currency] = value
-                total += value
-            allocations = {}
-            for base_currency in portfolio:
-                allocations[base_currency] = values[base_currency] / total
+                portfolio = json.load(f)['portfolio']
+            prices = await get_prices_dict(rest_client, portfolio, QUOTE_CURRENCY, product_ids)
+            prices_btc = await get_prices_dict(rest_client, portfolio, 'BTC', product_ids)
+
+            allocations = compute_allocations(prices, portfolio)
+            allocations_btc = compute_allocations(prices_btc, portfolio)
 
             json_output({
-                'total': total,
-                'prices': float_prices,
-                'portfolio': float_amount,
-                'values': values,
-                'allocations': allocations
+                'time': time_str,
+                'allocations': allocations,
+                'allocations_btc': allocations_btc
             }, args.out)
 
             return
@@ -105,191 +68,316 @@ async def main():
                 portfolio = json.load(f)
 
             if args.method == 'equidistrib':
-                target_allocations = {}
-                total = 0.0
-                for currency in portfolio:
-                    if currency == QUOTE_CURRENCY:
-                        target_allocations[currency] = 0.0
-                    else:
-                        target_allocations[currency] = 1.0
-                        total += 1.0
-                for currency in portfolio:
-                    target_allocations[currency] /= total
-                json_output(target_allocations, args.out)
+                json_output(compute_equidistrib_allocations(
+                    portfolio, set([QUOTE_CURRENCY])), args.out)
             else:
                 logging.error("Only 'equidistrib' is supported for now")
 
             return
 
         if args.action == 'get-orders':
-            with open(args.allocations) as f:
-                allocations = json.load(f)
+            with open(args.portfolio) as f:
+                portfolio = json.load(f)['portfolio']
             with open(args.target_allocations) as f:
                 target_allocations = json.load(f)
 
-            target_values = {}
-            value_to_sell = {}
-            amount_to_sell = {}
-            for c in target_allocations:
-                target_values[c] = target_allocations[c] * allocations['total']
-                current_value = allocations['values'][c] if c in allocations['values'] else 0.0
-                value_to_sell[c] = current_value - target_values[c]
-                amount_to_sell[c] = value_to_sell[c] / allocations['prices'][c]
+            output = {}
 
-            json_output(value_to_sell)
-            json_output(amount_to_sell)
+            output['portfolio'] = portfolio
+            output['target_allocations'] = target_allocations
 
-            sum_positive = 0
-            sum_negative = 0
-            for c in target_allocations:
-                if value_to_sell[c] > 0.0:
-                    sum_negative += value_to_sell[c]
-                else:
-                    sum_positive += value_to_sell[c]
-            print(sum_positive, sum_negative)
+            SWAP_CURRENCY = 'BTC'
+            output['swap_currency'] = SWAP_CURRENCY
 
-            TARGET_CURRENCY = 'BTC'
+            prices = await get_prices_dict(rest_client, portfolio, SWAP_CURRENCY, product_ids)
+            allocations = compute_allocations(prices, portfolio)
+
+            output['prices'] = prices
+            output['allocations'] = allocations
+
+            value_to_sell = compute_value_to_sell(
+                target_allocations, allocations['values'], allocations['total'])
+            amount_to_sell = compute_amount_to_sell(
+                value_to_sell, allocations['prices'])
+
+            output['value_to_sell'] = value_to_sell
+            output['amount_to_sell'] = amount_to_sell
+
+            output['check_sums'] = check_sums(value_to_sell)
 
             orders = []
 
-            ruled_amount_to_sell = {}
+            ruled_size_to_sell = {}
             # Start by computing sell orders, to accumulate BTCs
             for currency in amount_to_sell:
-                if currency == TARGET_CURRENCY:
+                if currency == SWAP_CURRENCY:
                     continue
                 if amount_to_sell[currency] <= 0.0:
                     continue
-                if f'{currency}-{TARGET_CURRENCY}' in product_ids:
+                if f'{currency}-{SWAP_CURRENCY}' in product_ids:
                     # we need to sell on that market
-                    product_id = f'{currency}-{TARGET_CURRENCY}'
-                    product = product_ids[product_id]
+                    product_id = f'{currency}-{SWAP_CURRENCY}'
                     side = 'sell'
-                    key = 'base_increment'
-                elif f'{TARGET_CURRENCY}-{currency}' in product_ids:
+                    size = amount_to_sell[currency]
+                    wanted_price = allocations['prices'][currency]
+                elif f'{SWAP_CURRENCY}-{currency}' in product_ids:
                     # we need to buy on that market
-                    product_id = f'{TARGET_CURRENCY}-{currency}'
-                    product = product_ids[product_id]
+                    product_id = f'{SWAP_CURRENCY}-{currency}'
                     side = 'buy'
-                    key = 'quote_increment'
+                    size = amount_to_sell[currency] * prices[currency]
+                    wanted_price = 1 / allocations['prices'][currency]
                 else:
                     logging.error(
-                        f'{TARGET_CURRENCY}-{currency} market does not exist')
-                decimals = product[key].split('.')[1]
-                if '1' in decimals:
-                    decimals_count = 1 + len(decimals.split('1')[0])
-                else:
-                    decimals_count = 0
-                amount = int(amount_to_sell[currency] *
-                             10**decimals_count) / 10**decimals_count
-                ruled_amount_to_sell[currency] = amount
+                        f'{SWAP_CURRENCY}-{currency} market does not exist')
+
+                product = product_ids[product_id]
+                size = round_to_increment(size, product['base_increment'])
+
+                min_size = float(product['base_min_size'])
+                max_size = float(product['base_max_size'])
+                if size < min_size:
+                    size = 0
+                elif size > max_size:
+                    size = max_size
+
+                ruled_size_to_sell[currency] = size
+
+                if ruled_size_to_sell[currency] == 0.0:
+                    continue
+
                 order = {
-                    'type': 'market',
-                    'side': side,
                     'product_id': product_id,
-                    'amount': amount,
-                    'value': amount * allocations['prices'][c]
+                    'side': side,
+                    'size': size,
+                    'currency': currency,
+                    'wanted_price': wanted_price
                 }
-                if side == 'sell':
-                    order['size'] = str(amount)
-                else:
-                    order['funds'] = str(amount)
+
                 orders.append(order)
 
             for currency in amount_to_sell:
-                if currency == TARGET_CURRENCY:
+                if currency == SWAP_CURRENCY:
                     continue
                 if amount_to_sell[currency] >= 0.0:
                     continue
                 amount_to_buy = -amount_to_sell[currency]
-                if f'{currency}-{TARGET_CURRENCY}' in product_ids:
+                if f'{currency}-{SWAP_CURRENCY}' in product_ids:
                     # we need to sell on that market
-                    product_id = f'{currency}-{TARGET_CURRENCY}'
-                    product = product_ids[product_id]
+                    product_id = f'{currency}-{SWAP_CURRENCY}'
                     side = 'buy'
-                    key = 'base_increment'
-                elif f'{TARGET_CURRENCY}-{currency}' in product_ids:
+                    size = amount_to_buy
+                    wanted_price = allocations['prices'][currency]
+                elif f'{SWAP_CURRENCY}-{currency}' in product_ids:
                     # we need to buy on that market
-                    product_id = f'{TARGET_CURRENCY}-{currency}'
-                    product = product_ids[product_id]
+                    product_id = f'{SWAP_CURRENCY}-{currency}'
                     side = 'sell'
-                    key = 'quote_increment'
+                    size = amount_to_buy * prices[currency]
+                    wanted_price = 1 / allocations['prices'][currency]
                 else:
                     logging.error(
-                        f'{TARGET_CURRENCY}-{currency} market does not exist')
-                decimals = product[key].split('.')[1]
-                if '1' in decimals:
-                    decimals_count = 1 + len(decimals.split('1')[0])
-                else:
-                    decimals_count = 0
-                amount = int(amount_to_buy *
-                             10**decimals_count) / 10**decimals_count
-                ruled_amount_to_sell[currency] = -amount
+                        f'{SWAP_CURRENCY}-{currency} market does not exist')
+
+                product = product_ids[product_id]
+                size = round_to_increment(size, product['base_increment'])
+
+                min_size = float(product['base_min_size'])
+                max_size = float(product['base_max_size'])
+                if size < min_size:
+                    size = 0
+                elif size > max_size:
+                    size = max_size
+
+                ruled_size_to_sell[currency] = size
+
+                if ruled_size_to_sell[currency] == 0.0:
+                    continue
+
                 order = {
-                    'type': 'market',
-                    'side': side,
                     'product_id': product_id,
-                    'amount': amount,
-                    'value': amount * allocations['prices'][c]
+                    'side': side,
+                    'size': size,
+                    'currency': currency,
+                    'wanted_price': wanted_price
                 }
-                if side == 'buy':
-                    order['size'] = str(amount)
-                else:
-                    order['funds'] = str(amount)
+
                 orders.append(order)
 
-            json_output(ruled_amount_to_sell)
-            json_output(orders)
+            output['ruled_size_to_sell'] = ruled_size_to_sell
 
-            # encoutered issues:
-            # - some market throw an exception copra.rest.client.APIRequestError: Limit only mode [400] (EOS-BTC)
-            # - bounds need to be respected
-            # - todo: should use limit orders (and monitor them)
-            # - need to update portfolio according to what has been bought
+            PERCENTAGE_THRESHOLD = 0.5
+            output['percentage_treshold'] = PERCENTAGE_THRESHOLD
 
-            if False:
-                for i in range(len(orders), len(orders)):
-                    if orders[i]['amount'] > 0.0:
-                        print(i, orders[i])
-                        if 'size' in orders[i]:
-                            req_size = float(orders[i]['size'])
-                            min_size = float(
-                                product_ids[orders[i]['product_id']]['base_min_size'])
-                            max_size = float(
-                                product_ids[orders[i]['product_id']]['base_max_size'])
-                            if req_size < min_size or req_size > max_size:
-                                logging.error(
-                                    'Requested size is not in bounds')
-                                continue
+            limit_orders = []
+            for order in orders:
+                product_id = order['product_id']
+                side = order['side']
+                size = order['size']
+                wanted_price = order['wanted_price']
 
-                            r = await rest_client.market_order(orders[i]['side'], orders[i]['product_id'],
-                                                               size=orders[i]['size'])
-                        elif 'funds' in orders[i]:
-                            req_funds = float(orders[i]['funds'])
-                            min_funds = float(
-                                product_ids[orders[i]['product_id']]['min_market_funds'])
-                            max_funds = float(
-                                product_ids[orders[i]['product_id']]['max_market_funds'])
-                            if req_funds < min_funds or req_funds > max_funds:
-                                logging.error(
-                                    'Requested funds is not in bounds')
-                                continue
-                            r = await rest_client.market_order(orders[i]['side'], orders[i]['product_id'],
-                                                               funds=orders[i]['funds'])
-                        else:
-                            logging.error('No size or funds in order')
-                            continue
-                        print(r)
-                        await asyncio.sleep(0.5)
-                        while True:
-                            r2 = await rest_client.get_order(r['id'])
-                            if r2['status'] == 'done':
-                                break
-                            await asyncio.sleep(0.2)
-                        print(f'order {i} executed')
+                ticker = await rest_client.ticker(product_id)
+                order_price = float(
+                    ticker['bid']) if side == 'sell' else float(ticker['ask'])
+
+                percentage_diff = 100 * \
+                    (order_price - wanted_price) / wanted_price
+
+                
+                try_it = True
+
+                if side == 'sell' and percentage_diff < -PERCENTAGE_THRESHOLD:
+                    try_it = False
+                if side == 'buy' and percentage_diff > PERCENTAGE_THRESHOLD:
+                    try_it = False
+
+                limit_orders.append(
+                    {
+                        'base_order': order,
+                        'ticker': ticker,
+                        'order_price': order_price,
+                        'percentage_diff': percentage_diff,
+                        'try_it': try_it
+                    }
+                )
+                    # r = limit_order(self, side, product_id, price, size,
+                    #             time_in_force='GTC', cancel_after=None,
+                    #             post_only=False, client_oid=None, stp='dc',
+                    #             stop=None, stop_price=None)
+                    # logging.info(r)
+                    # await asyncio.sleep(0.5)
+                    # while True:
+                    #     r2 = await rest_client.get_order(r['id'])
+                    #     if r2['status'] == 'done':
+                    #         break
+                    #     await asyncio.sleep(0.2)
+                    # logging.info(f'order {i} executed')
+
+            output['orders'] = limit_orders
+
+            if args.do_it:
+                logging.info('do-it !')
+
+            json_output(output)
 
             return
 
         args_parser.print_help()
+
+
+def round_to_increment(amount, increment_string):
+    decimals = increment_string.split('.')[1]
+    if '1' in decimals:
+        decimals_count = 1 + len(decimals.split('1')[0])
+    else:
+        decimals_count = 0
+    return int(amount * 10**decimals_count) / 10**decimals_count
+
+
+def check_sums(value_to_sell):
+    sum_positive = 0
+    sum_negative = 0
+    for c in value_to_sell:
+        if value_to_sell[c] > 0.0:
+            sum_negative += value_to_sell[c]
+        else:
+            sum_positive += value_to_sell[c]
+    return sum_positive + sum_negative
+
+
+def compute_value_to_sell(target_allocations, current_values, current_total):
+    value_to_sell = {}
+    for c in target_allocations:
+        target_value = target_allocations[c] * current_total
+        current_value = current_values[c] if c in current_values else 0.0
+        value_to_sell[c] = current_value - target_value
+    return value_to_sell
+
+
+def compute_amount_to_sell(value_to_sell, current_prices):
+    amount_to_sell = {}
+    for c in value_to_sell:
+        amount_to_sell[c] = value_to_sell[c] / current_prices[c]
+    return amount_to_sell
+
+
+def compute_equidistrib_allocations(portfolio, exclude_symbols=set()):
+    target_allocations = {}
+    total = 0.0
+    for currency in portfolio:
+        if currency in exclude_symbols:
+            target_allocations[currency] = 0.0
+        else:
+            target_allocations[currency] = 1.0
+            total += 1.0
+    for currency in portfolio:
+        target_allocations[currency] /= total
+    return target_allocations
+
+
+def compute_allocations(prices, portfolio):
+    total = 0.0
+    values = {}
+    float_prices = {}
+    float_amount = {}
+    for base_currency in prices:
+        price = float(prices[base_currency])
+        float_prices[base_currency] = price
+        amount = float(portfolio[base_currency])
+        float_amount[base_currency] = amount
+        value = price * amount
+        values[base_currency] = value
+        total += value
+    allocations = {}
+    for base_currency in portfolio:
+        allocations[base_currency] = values[base_currency] / total
+    return {
+        'total': total,
+        'prices': float_prices,
+        'portfolio': float_amount,
+        'values': values,
+        'allocations': allocations
+    }
+
+
+async def get_portfolio(rest_client):
+    accounts = await rest_client.accounts()
+    return {item['currency']: item['balance']
+            for item in accounts if float(item['balance']) != 0}
+
+
+async def get_prices_dict(rest_client, portfolio, quote_currency, product_ids):
+    prices = {}
+    for base_currency in portfolio:
+        await asyncio.sleep(0.2)
+        if base_currency == quote_currency:
+            prices[base_currency] = 1.0
+            continue
+        wanted_product_id = f'{base_currency}-{quote_currency}'
+        if wanted_product_id in product_ids:
+            prices[base_currency] = float((await rest_client.ticker(wanted_product_id))['price'])
+            continue
+        reverse_product_id = f'{quote_currency}-{base_currency}'
+        if reverse_product_id in product_ids:
+            price_of_quote_in_base = float((await rest_client.ticker(reverse_product_id))['price'])
+            price_of_base_in_quote = 1.0 / price_of_quote_in_base
+            prices[base_currency] = price_of_base_in_quote
+            continue
+        if base_currency == 'BTC':
+            logging.error(
+                f'No market to convert {base_currency} to {quote_currency}')
+            exit(-1)
+
+        btc_product_id = f'{base_currency}-BTC'
+        if btc_product_id in product_ids:
+            btc_price = float((await rest_client.ticker(btc_product_id))['price'])
+        else:
+            btc_product_id = f'BTC-{base_currency}'
+            btc_price = 1.0 / float((await rest_client.ticker(btc_product_id))['price'])
+
+        base_product_id = f'BTC-{quote_currency}'
+        base_price = float((await rest_client.ticker(base_product_id))['price'])
+
+        prices[base_currency] = base_price * btc_price
+    return prices
 
 
 def json_output(data: dict, outfile=None):
@@ -344,9 +432,12 @@ def parse_cli_args():
 
     command_parser = commands.add_parser('get-orders')
     command_parser.add_argument(
-        'allocations', help='Allocations stored in json file. Can be obtained with get-allocations command.')
+        'portfolio', help='Portfolio stored in json file. Can be obtained with get-portfolio command.')
     command_parser.add_argument(
         'target_allocations', help='Target allocation stored in json file. Can be obtained with get-target-allocations.'
+    )
+    command_parser.add_argument(
+        '--do-it', action='store_true', help='Performs rebalance.'
     )
     command_parser.add_argument('-o', '--out', help='Output json file')
 
