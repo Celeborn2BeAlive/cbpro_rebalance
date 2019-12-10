@@ -207,6 +207,13 @@ async def main():
             PERCENTAGE_THRESHOLD = 0.5
             output['percentage_treshold'] = PERCENTAGE_THRESHOLD
 
+            output['orders'] = orders
+
+            if args.do_it:
+                logging.info('Start trading')
+            else:
+                logging.info('Only compute limit orders')
+
             limit_orders = []
             for order in orders:
                 product_id = order['product_id']
@@ -221,7 +228,6 @@ async def main():
                 percentage_diff = 100 * \
                     (order_price - wanted_price) / wanted_price
 
-                
                 try_it = True
 
                 if side == 'sell' and percentage_diff < -PERCENTAGE_THRESHOLD:
@@ -229,32 +235,34 @@ async def main():
                 if side == 'buy' and percentage_diff > PERCENTAGE_THRESHOLD:
                     try_it = False
 
-                limit_orders.append(
-                    {
-                        'base_order': order,
-                        'ticker': ticker,
-                        'order_price': order_price,
-                        'percentage_diff': percentage_diff,
-                        'try_it': try_it
-                    }
-                )
-                    # r = limit_order(self, side, product_id, price, size,
-                    #             time_in_force='GTC', cancel_after=None,
-                    #             post_only=False, client_oid=None, stp='dc',
-                    #             stop=None, stop_price=None)
-                    # logging.info(r)
-                    # await asyncio.sleep(0.5)
-                    # while True:
-                    #     r2 = await rest_client.get_order(r['id'])
-                    #     if r2['status'] == 'done':
-                    #         break
-                    #     await asyncio.sleep(0.2)
-                    # logging.info(f'order {i} executed')
+                limit_order = {
+                    'base_order': order,
+                    'ticker': ticker,
+                    'order_price': order_price,
+                    'percentage_diff': percentage_diff,
+                    'try_it': try_it
+                }
 
-            output['orders'] = limit_orders
+                if args.do_it:
+                    if try_it:
+                        response = await rest_client.limit_order(
+                            side, product_id, order_price, size,
+                            time_in_force='GTT', cancel_after='min',
+                            post_only=True)
+                        limit_order['submit_response'] = response
+                        logging.info(response)
 
-            if args.do_it:
-                logging.info('do-it !')
+                limit_orders.append(limit_order)
+
+            for order in limit_orders:
+                id = order['submit_response']['id']
+                response = await rest_client.get_order(id)
+                order['query_response'] = response
+                if response['status'] == 'done':
+                    logging.info(f'{id} executed')
+                else:
+                    logging.info(f'{id} pending, cancelling')
+                    order['cancelled'] = True
 
             json_output(output)
 
