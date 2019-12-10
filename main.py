@@ -306,6 +306,7 @@ async def main():
             if args.do_it:
                 epoch = 0
                 executed_count = 0
+
                 while executed_count != submitted_count:
                     logging.info(
                         f'Epoch {epoch} executed count = {executed_count}')
@@ -315,7 +316,8 @@ async def main():
                             try:
                                 response = await rest_client.get_order(id)
                                 if len(order['query_responses']) == 0 or order['query_responses'][-1] != response:
-                                    order['query_responses'].append(response)
+                                    order['query_responses'].append(
+                                        response)
                                 if response['status'] == 'done':
                                     logging.info(f'{id} executed')
                                     order['done'] = True
@@ -328,10 +330,12 @@ async def main():
                                     order['error'] = True
                                     executed_count += 1
                                 else:
-                                    logging.error(f'order {id} error : {e}')
+                                    logging.error(
+                                        f'order {id} error : {e}')
                                     raise e
                     epoch += 1
                     await asyncio.sleep(1)
+
                 output['epoch'] = epoch
 
             output['limit_orders'] = limit_orders
