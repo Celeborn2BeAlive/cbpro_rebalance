@@ -264,6 +264,8 @@ async def main():
                     logging.info(f'{id} pending, cancelling')
                     order['cancelled'] = True
 
+            output['limit_orders'] = limit_orders
+
             json_output(output)
 
             return
