@@ -204,6 +204,7 @@ async def main():
 
             output['ruled_size_to_sell'] = ruled_size_to_sell
 
+            # todo: this should be proportional to increment / current_price, for example EOS-BTC was at 0.277% of increment at test time
             PERCENTAGE_THRESHOLD = 0.5
             output['percentage_treshold'] = PERCENTAGE_THRESHOLD
 
@@ -221,9 +222,26 @@ async def main():
                 size = order['size']
                 wanted_price = order['wanted_price']
 
+                increment_string = product_ids[product_id]['quote_increment']
+                quote_increment = float(increment_string)
+
                 ticker = await rest_client.ticker(product_id)
-                order_price = float(
+
+                base_order_price = float(
                     ticker['bid']) if side == 'sell' else float(ticker['ask'])
+
+                corrected_order_price = base_order_price
+                increment_multiplier = 1
+
+                while corrected_order_price == base_order_price:
+                    increment = increment_multiplier * quote_increment
+                    increment_multiplier += 1
+                    corrected_order_price = base_order_price + \
+                        increment if side == 'sell' else base_order_price - increment
+                    corrected_order_price = round_to_increment(
+                        corrected_order_price, increment_string)
+
+                order_price = corrected_order_price
 
                 percentage_diff = 100 * \
                     (order_price - wanted_price) / wanted_price
@@ -239,30 +257,46 @@ async def main():
                     'base_order': order,
                     'ticker': ticker,
                     'order_price': order_price,
+                    'base_order_price': base_order_price,
+                    'corrected_order_price': corrected_order_price,
+                    'increment_multiplier': increment_multiplier,
                     'percentage_diff': percentage_diff,
                     'try_it': try_it
                 }
 
                 if args.do_it:
                     if try_it:
-                        response = await rest_client.limit_order(
-                            side, product_id, order_price, size,
-                            time_in_force='GTT', cancel_after='min',
-                            post_only=True)
-                        limit_order['submit_response'] = response
-                        logging.info(response)
+                        # note: can throw with copra.rest.client.APIRequestError: Post only mode [400]
+                        # if price has changed fast
+                        try:
+                            response = await rest_client.limit_order(
+                                side, product_id, order_price, size,
+                                time_in_force='GTT', cancel_after='hour',
+                                post_only=True)
+                            limit_order['submit_response'] = response
+                            logging.info(response)
+                        except Exception as e:
+                            logging.error(e)
+                            logging.info(order_price)
+                            logging.info(quote_increment)
 
                 limit_orders.append(limit_order)
 
-            for order in limit_orders:
-                id = order['submit_response']['id']
-                response = await rest_client.get_order(id)
-                order['query_response'] = response
-                if response['status'] == 'done':
-                    logging.info(f'{id} executed')
-                else:
-                    logging.info(f'{id} pending, cancelling')
-                    order['cancelled'] = True
+            if args.do_it:
+                for order in limit_orders:
+                    if order['try_it']:
+                        try:
+                            id = order['submit_response']['id']
+                            response = await rest_client.get_order(id)
+                            order['query_response'] = response
+                            if response['status'] == 'done':
+                                logging.info(f'{id} executed')
+                            else:
+                                logging.info(f'{id} pending, cancelling')
+                                response = await rest_client.cancel(id)
+                                order['cancel_response'] = response
+                        except Exception as e:
+                            logging.error(e)
 
             output['limit_orders'] = limit_orders
 
