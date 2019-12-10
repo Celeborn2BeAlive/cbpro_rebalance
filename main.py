@@ -9,6 +9,21 @@ from datetime import datetime
 from collections import defaultdict
 
 from copra.rest import Client as RestClient
+from copra.rest.client import APIRequestError
+
+# TODO
+# - handle buying of new assets (right now we can only buy/sell assets from the portfolio)
+# - watch and repost orders when they are cancelled
+# - better computation of threshold on percentage diff (should depend on increment and current price)
+# - better tradeof between buying at bid/ask price vs market order, depending on increment and current price ratio
+# - new portfolio computation based on executed orders
+# - loop on previous portfolio to implement daily rebalance
+# - threshold based rebalancing
+# - Exchange interface + BacktestExchange
+# - Trader class
+# - Markowitz rebalancing
+# - Compute portfolio values in fiat currency (each line and the total)
+# - Cancel all orders if errors
 
 
 async def main():
@@ -271,9 +286,11 @@ async def main():
                         try:
                             response = await rest_client.limit_order(
                                 side, product_id, order_price, size,
-                                time_in_force='GTT', cancel_after='hour',
+                                time_in_force='GTT', cancel_after='min',
                                 post_only=True)
                             limit_order['submit_response'] = response
+                            limit_order['query_responses'] = []
+                            limit_order['done'] = False
                             logging.info(response)
                         except Exception as e:
                             logging.error(e)
@@ -282,21 +299,40 @@ async def main():
 
                 limit_orders.append(limit_order)
 
+            submitted_count = len(
+                [order for order in limit_orders if 'submit_response' in order])
+            output['submitted_count'] = submitted_count
+
             if args.do_it:
-                for order in limit_orders:
-                    if order['try_it']:
-                        try:
+                epoch = 0
+                executed_count = 0
+                while executed_count != submitted_count:
+                    logging.info(
+                        f'Epoch {epoch} executed count = {executed_count}')
+                    for order in limit_orders:
+                        if order['try_it'] and not order['done']:
                             id = order['submit_response']['id']
-                            response = await rest_client.get_order(id)
-                            order['query_response'] = response
-                            if response['status'] == 'done':
-                                logging.info(f'{id} executed')
-                            else:
-                                logging.info(f'{id} pending, cancelling')
-                                response = await rest_client.cancel(id)
-                                order['cancel_response'] = response
-                        except Exception as e:
-                            logging.error(e)
+                            try:
+                                response = await rest_client.get_order(id)
+                                if len(order['query_responses']) == 0 or order['query_responses'][-1] != response:
+                                    order['query_responses'].append(response)
+                                if response['status'] == 'done':
+                                    logging.info(f'{id} executed')
+                                    order['done'] = True
+                                    executed_count += 1
+                            except APIRequestError as e:
+                                if e.response.status == 404:
+                                    # NotFound: order has been cancelled, we should repost it
+                                    logging.info(f'{id} canceled')
+                                    order['done'] = True
+                                    order['error'] = True
+                                    executed_count += 1
+                                else:
+                                    logging.error(f'order {id} error : {e}')
+                                    raise e
+                    epoch += 1
+                    await asyncio.sleep(1)
+                output['epoch'] = epoch
 
             output['limit_orders'] = limit_orders
 
