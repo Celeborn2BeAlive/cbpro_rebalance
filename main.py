@@ -12,19 +12,19 @@ from copra.rest import Client as RestClient
 from copra.rest.client import APIRequestError
 
 # TODO
-# - handle buying of new assets (right now we can only buy/sell assets from the portfolio)
 # - * watch and repost orders when they are cancelled
+# - * new portfolio computation based on executed orders
+# - * loop on previous portfolio to implement hourly rebalance with threshold based rebalancing
+# - * Compute portfolio values in fiat currency (each line and the total)
+# - * Cancel all orders if errors
+
+# - handle buying of new assets (right now we can only buy/sell assets from the portfolio)
 # - better computation of threshold on percentage diff (should depend on increment and current price)
 # - better tradeof between buying at bid/ask price vs market order, depending on increment and current price ratio
-# - * new portfolio computation based on executed orders
-# - * loop on previous portfolio to implement daily rebalance
-# - * threshold based rebalancing
 # - Unit testing
 # - Exchange interface + BacktestExchange
 # - Trader class
 # - Markowitz rebalancing
-# - * Compute portfolio values in fiat currency (each line and the total)
-# - * Cancel all orders if errors
 # - Binance implementation of Exchange interface
 
 # Example of response for limit_order():
