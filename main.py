@@ -87,6 +87,9 @@ from copra.rest.client import APIRequestError
 #     "settled": true
 # }
 
+COINBASE_MAX_REQUEST_TRIALS_COUNT = 100
+COINBASE_TIME_TO_SLEEP = 0.2
+
 
 class CoinbaseExchange():
     def __init__(self, config: dict):
@@ -100,18 +103,33 @@ class CoinbaseExchange():
     async def __aexit__(self, *args):
         await self.rest_client.close()
 
+    async def client_request(self, function, *args):
+        trials_count = 0
+        while trials_count < COINBASE_MAX_REQUEST_TRIALS_COUNT:
+            trials_count += 1
+            try:
+                return await function(*args)
+            except APIRequestError as e:
+                # Public rate limit exceeded [429]
+                if e.response.status == 429:
+                    logging.warning(
+                        'Public rate limit exceeded, waiting a bit...')
+                    await asyncio.sleep(COINBASE_TIME_TO_SLEEP)
+                else:
+                    raise e
+
     async def products(self):
-        return await self.rest_client.products()
+        return sorted(await self.client_request(self.rest_client.products), key=lambda e: e['id'])
 
     async def ticker(self, product_id):
-        return await self.rest_client.ticker(product_id)
+        return await self.client_request(self.rest_client.ticker, product_id)
 
     async def limit_order(self, side, product_id, order_price, size):
         try:
-            return await self.rest_client.limit_order(
-                side, product_id, order_price, size,
-                time_in_force='GTT', cancel_after='hour',
-                post_only=True)
+            return await self.client_request(self.rest_client.limit_order,
+                                             side, product_id, order_price, size,
+                                             time_in_force='GTT', cancel_after='hour',
+                                             post_only=True)
         except APIRequestError as e:
             if e.response.status == 404:
                 # Post only mode [400]: order has been cancelled, we return None
@@ -120,7 +138,7 @@ class CoinbaseExchange():
 
     async def get_order(self, order_id):
         try:
-            return await self.rest_client.get_order(order_id)
+            return await self.client_request(self.rest_client.get_order, order_id)
         except APIRequestError as e:
             if e.response.status == 404:
                 # NotFound [404]: order has been cancelled, we return None
@@ -128,11 +146,15 @@ class CoinbaseExchange():
             raise e  # Unknown error, can do nothing from here
 
     async def accounts(self):
-        return await self.rest_client.accounts()
+        return sorted(await self.client_request(self.rest_client.accounts), key=lambda e: e['id'])
+
+    async def fees(self):
+        return await self.client_request(self.rest_client.fees)
 
 
 class FreezedStateExchange():
     def __init__(self, config: dict):
+        self.config = config
         self.next_order_id = 0
         self.pending_orders = {}
         pass
@@ -144,15 +166,15 @@ class FreezedStateExchange():
         pass
 
     async def products(self):
-        return self.config.products
+        return self.config['products']
 
     async def ticker(self, product_id):
-        return self.config.tickers[product_id]
+        return self.config['tickers'][product_id]
 
     async def limit_order(self, side, product_id, order_price, size):
         created_time = datetime.now()
         time_fmt = '%Y-%m-%dT%H:%M:%S'
-        reponse = {
+        response = {
             "id": f"{self.next_order_id}",
             "price": f"{order_price}",
             "size": f"{size}",
@@ -161,7 +183,7 @@ class FreezedStateExchange():
             "stp": "dc",
             "type": "limit",
             "time_in_force": "GTT",
-            "expire_time": (created_time + timedelta.seconds(3600)).strftime(time_fmt),
+            "expire_time": (created_time + timedelta(hours=1)).strftime(time_fmt),
             "post_only": True,
             "created_at": created_time.strftime(time_fmt),
             "fill_fees": "0",
@@ -171,25 +193,39 @@ class FreezedStateExchange():
             "settled": False
         }
         self.next_order_id += 1
-        self.pending_orders[reponse['id']] = response
+        self.pending_orders[response['id']] = response
 
-        return reponse
+        return response
 
     async def get_order(self, order_id):
         if order_id in self.pending_orders:
             order = self.pending_orders[order_id]
             del self.pending_orders[order_id]
-            order.fill_size = order.size
-            executed_value = float(order.size) * float(order.price)
-            order.executed_value = str(executed_value)
-            maker_fee_rate = float(self.config.fees['maker_fee_rate'])
-            order.fill_fees = maker_fee_rate * float(executed_value)
-            order.status = 'done'
-            order.settled = True
+            order['fill_size'] = order['size']
+            executed_value = float(order['size']) * float(order['price'])
+            order['executed_value'] = str(executed_value)
+            maker_fee_rate = float(self.config['fees']['maker_fee_rate'])
+            order['fill_fees'] = maker_fee_rate * float(executed_value)
+            order['status'] = 'done'
+            order['settled'] = True
+            return order
         return None
 
     async def accounts(self):
-        return self.config.accounts
+        return self.config['accounts']
+
+    async def fees(self):
+        return self.config['fees']
+
+
+def make_exchange(args):
+    with open(args.config, 'r') as f:
+        config = json.load(f)
+    if args.exchange_type == 'live':
+        return CoinbaseExchange(config)
+    elif args.exchange_type == 'freezed':
+        return FreezedStateExchange(config)
+    return None
 
 
 MAX_LIMIT_ORDER_TRIAL_COUNT = 5
@@ -199,10 +235,7 @@ async def main():
     args, args_parser = parse_cli_args()
     init_logging(args)
 
-    with open(args.creds, 'r') as f:
-        creds = json.load(f)
-
-    async with CoinbaseExchange(creds) as exchange:
+    async with make_exchange(args) as exchange:
         products = await exchange.products()
         product_ids = {p['id']: p for p in products}
 
@@ -211,19 +244,18 @@ async def main():
         time = datetime.now()
         time_str = time.strftime('%Y-%m-%d-%H:%M:%S')
 
-        def fun_with_graph():
-            BANNED_CURRENCIES = ['USD']
-
-            products_graph = Digraph()
+        if args.action == 'get-freezed-state-exchange-config':
+            output_dict = {
+                'time': time_str,
+                'products': products,
+                'accounts': await exchange.accounts(),
+                'fees': await exchange.fees(),
+                'tickers': {}
+            }
             for p in product_ids:
-                base, quote = p.split('-')
-                if base in BANNED_CURRENCIES or quote in BANNED_CURRENCIES:
-                    continue
-                products_graph.addNode(base, quote)
-                products_graph.addEdge(base, quote, 1.0)
-                products_graph.addEdge(quote, base, 1.0)
-
-            print(products_graph.min_path('EUR', 'USDC'))
+                output_dict['tickers'][p] = await exchange.ticker(p)
+            json_output(output_dict, args.out)
+            return
 
         if args.action == 'get-portfolio':
             json_output({'time': time_str, 'portfolio': await get_portfolio(exchange)}, args.out)
@@ -467,6 +499,7 @@ async def main():
                             logging.error(e)
                             logging.info(order_price)
                             logging.info(quote_increment)
+                            raise e
                     else:
                         success = True  # Leave the loop
 
@@ -596,7 +629,6 @@ async def get_portfolio(exchange):
 async def get_prices_dict(exchange, portfolio, quote_currency, product_ids):
     prices = {}
     for base_currency in portfolio:
-        await asyncio.sleep(0.2)
         if base_currency == quote_currency:
             prices[base_currency] = 1.0
             continue
@@ -659,12 +691,18 @@ def parse_cli_args():
     parser = argparse.ArgumentParser(description='Desc')
     parser.add_argument('-l', '--log-file', help='Path to log file.')
     parser.add_argument(
-        '--creds', required=True, help='Path to json file containing credentials (apiKey, apiSecret, passPhrase)')
+        '--exchange-type', required=True, help='Type of exchange among "freezed, backtest, live"'
+    )
+    parser.add_argument(
+        '--config', required=True, help='Path to json file containing config for the specified exchange (apiKey, apiSecret, passPhrase) for live, freezed config for freezed')
 
     commands = parser.add_subparsers(
         title='commands', dest='action')
 
     command_parser = commands.add_parser('get-portfolio')
+    command_parser.add_argument('-o', '--out', help='Output json file')
+
+    command_parser = commands.add_parser('get-freezed-state-exchange-config')
     command_parser.add_argument('-o', '--out', help='Output json file')
 
     command_parser = commands.add_parser('get-allocations')
