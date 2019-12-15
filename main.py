@@ -5,7 +5,7 @@ import os
 import asyncio
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 from copra.rest import Client as RestClient
@@ -27,6 +27,173 @@ from copra.rest.client import APIRequestError
 # - * Cancel all orders if errors
 # - Binance implementation of Exchange interface
 
+# Example of response for limit_order():
+# {
+#     "id": "f15e831d-192f-4f6c-b9ec-21456b3aba9e",
+#     "price": "0.000359",
+#     "size": "0.1",
+#     "product_id": "EOS-BTC",
+#     "side": "buy",
+#     "stp": "dc",
+#     "type": "limit",
+#     "time_in_force": "GTT",
+#     "expire_time": "2019-12-11T01:55:38.276Z",
+#     "post_only": true,
+#     "created_at": "2019-12-10T01:55:38.278001Z",
+#     "fill_fees": "0",
+#     "filled_size": "0",
+#     "executed_value": "0",
+#     "status": "pending",
+#     "settled": false
+# }
+
+# Examples of response for get_order():
+# {
+#     "id": "f15e831d-192f-4f6c-b9ec-21456b3aba9e",
+#     "price": "0.00035900",
+#     "size": "0.10000000",
+#     "product_id": "EOS-BTC",
+#     "profile_id": "b8d559a1-9dd4-4cd3-9204-2a2965f3894f",
+#     "side": "buy",
+#     "type": "limit",
+#     "time_in_force": "GTT",
+#     "expire_time": "2019-12-11T01:55:38.276",
+#     "post_only": true,
+#     "created_at": "2019-12-10T01:55:38.278001Z",
+#     "fill_fees": "0.0000000000000000",
+#     "filled_size": "0.00000000",
+#     "executed_value": "0.0000000000000000",
+#     "status": "open",
+#     "settled": false
+# },
+# {
+#     "id": "f15e831d-192f-4f6c-b9ec-21456b3aba9e",
+#     "price": "0.00035900",
+#     "size": "0.10000000",
+#     "product_id": "EOS-BTC",
+#     "profile_id": "b8d559a1-9dd4-4cd3-9204-2a2965f3894f",
+#     "side": "buy",
+#     "type": "limit",
+#     "time_in_force": "GTT",
+#     "expire_time": "2019-12-11T01:55:38.276",
+#     "post_only": true,
+#     "created_at": "2019-12-10T01:55:38.278001Z",
+#     "done_at": "2019-12-10T02:30:12.665Z",
+#     "done_reason": "filled",
+#     "fill_fees": "0.0000001795000000",
+#     "filled_size": "0.10000000",
+#     "executed_value": "0.0000359000000000",
+#     "status": "done",
+#     "settled": true
+# }
+
+
+class CoinbaseExchange():
+    def __init__(self, config: dict):
+        self.rest_client = \
+            RestClient(asyncio.get_event_loop(), auth=True, key=config['apiKey'],
+                       secret=config['apiSecret'], passphrase=config['passPhrase'])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.rest_client.close()
+
+    async def products(self):
+        return await self.rest_client.products()
+
+    async def ticker(self, product_id):
+        return await self.rest_client.ticker(product_id)
+
+    async def limit_order(self, side, product_id, order_price, size):
+        try:
+            return await self.rest_client.limit_order(
+                side, product_id, order_price, size,
+                time_in_force='GTT', cancel_after='hour',
+                post_only=True)
+        except APIRequestError as e:
+            if e.response.status == 404:
+                # Post only mode [400]: order has been cancelled, we return None
+                return None
+            raise e  # Unknown error, can do nothing from here
+
+    async def get_order(self, order_id):
+        try:
+            return await self.rest_client.get_order(order_id)
+        except APIRequestError as e:
+            if e.response.status == 404:
+                # NotFound [404]: order has been cancelled, we return None
+                return None
+            raise e  # Unknown error, can do nothing from here
+
+    async def accounts(self):
+        return await self.rest_client.accounts()
+
+
+class FreezedStateExchange():
+    def __init__(self, config: dict):
+        self.next_order_id = 0
+        self.pending_orders = {}
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def products(self):
+        return self.config.products
+
+    async def ticker(self, product_id):
+        return self.config.tickers[product_id]
+
+    async def limit_order(self, side, product_id, order_price, size):
+        created_time = datetime.now()
+        time_fmt = '%Y-%m-%dT%H:%M:%S'
+        reponse = {
+            "id": f"{self.next_order_id}",
+            "price": f"{order_price}",
+            "size": f"{size}",
+            "product_id": f"{product_id}",
+            "side": f"{side}",
+            "stp": "dc",
+            "type": "limit",
+            "time_in_force": "GTT",
+            "expire_time": (created_time + timedelta.seconds(3600)).strftime(time_fmt),
+            "post_only": True,
+            "created_at": created_time.strftime(time_fmt),
+            "fill_fees": "0",
+            "filled_size": "0",
+            "executed_value": "0",
+            "status": "pending",
+            "settled": False
+        }
+        self.next_order_id += 1
+        self.pending_orders[reponse['id']] = response
+
+        return reponse
+
+    async def get_order(self, order_id):
+        if order_id in self.pending_orders:
+            order = self.pending_orders[order_id]
+            del self.pending_orders[order_id]
+            order.fill_size = order.size
+            executed_value = float(order.size) * float(order.price)
+            order.executed_value = str(executed_value)
+            maker_fee_rate = float(self.config.fees['maker_fee_rate'])
+            order.fill_fees = maker_fee_rate * float(executed_value)
+            order.status = 'done'
+            order.settled = True
+        return None
+
+    async def accounts(self):
+        return self.config.accounts
+
+
+MAX_LIMIT_ORDER_TRIAL_COUNT = 5
+
 
 async def main():
     args, args_parser = parse_cli_args()
@@ -35,9 +202,8 @@ async def main():
     with open(args.creds, 'r') as f:
         creds = json.load(f)
 
-    async with RestClient(asyncio.get_event_loop(), auth=True, key=creds['apiKey'],
-                          secret=creds['apiSecret'], passphrase=creds['passPhrase']) as rest_client:
-        products = await rest_client.products()
+    async with CoinbaseExchange(creds) as exchange:
+        products = await exchange.products()
         product_ids = {p['id']: p for p in products}
 
         QUOTE_CURRENCY = 'EUR'
@@ -60,14 +226,14 @@ async def main():
             print(products_graph.min_path('EUR', 'USDC'))
 
         if args.action == 'get-portfolio':
-            json_output({'time': time_str, 'portfolio': await get_portfolio(rest_client)}, args.out)
+            json_output({'time': time_str, 'portfolio': await get_portfolio(exchange)}, args.out)
             return
 
         if args.action == 'get-allocations':
             with open(args.portfolio) as f:
                 portfolio = json.load(f)['portfolio']
-            prices = await get_prices_dict(rest_client, portfolio, QUOTE_CURRENCY, product_ids)
-            prices_btc = await get_prices_dict(rest_client, portfolio, 'BTC', product_ids)
+            prices = await get_prices_dict(exchange, portfolio, QUOTE_CURRENCY, product_ids)
+            prices_btc = await get_prices_dict(exchange, portfolio, 'BTC', product_ids)
 
             allocations = compute_allocations(prices, portfolio)
             allocations_btc = compute_allocations(prices_btc, portfolio)
@@ -106,7 +272,7 @@ async def main():
             SWAP_CURRENCY = 'BTC'
             output['swap_currency'] = SWAP_CURRENCY
 
-            prices = await get_prices_dict(rest_client, portfolio, SWAP_CURRENCY, product_ids)
+            prices = await get_prices_dict(exchange, portfolio, SWAP_CURRENCY, product_ids)
             allocations = compute_allocations(prices, portfolio)
 
             output['prices'] = prices
@@ -234,72 +400,75 @@ async def main():
 
             limit_orders = []
             for order in orders:
-                product_id = order['product_id']
-                side = order['side']
-                size = order['size']
-                wanted_price = order['wanted_price']
+                success = False
+                trial_count = 0
+                while not success and trial_count < MAX_LIMIT_ORDER_TRIAL_COUNT:
+                    trial_count += 1
+                    product_id = order['product_id']
+                    side = order['side']
+                    size = order['size']
+                    wanted_price = order['wanted_price']
 
-                increment_string = product_ids[product_id]['quote_increment']
-                quote_increment = float(increment_string)
+                    increment_string = product_ids[product_id]['quote_increment']
+                    quote_increment = float(increment_string)
 
-                ticker = await rest_client.ticker(product_id)
+                    ticker = await exchange.ticker(product_id)
 
-                base_order_price = float(
-                    ticker['bid']) if side == 'sell' else float(ticker['ask'])
+                    base_order_price = float(
+                        ticker['bid']) if side == 'sell' else float(ticker['ask'])
 
-                corrected_order_price = base_order_price
-                increment_multiplier = 1
+                    corrected_order_price = base_order_price
+                    increment_multiplier = 1
 
-                while corrected_order_price == base_order_price:
-                    increment = increment_multiplier * quote_increment
-                    increment_multiplier += 1
-                    corrected_order_price = base_order_price + \
-                        increment if side == 'sell' else base_order_price - increment
-                    corrected_order_price = round_to_increment(
-                        corrected_order_price, increment_string)
+                    while corrected_order_price == base_order_price:
+                        increment = increment_multiplier * quote_increment
+                        increment_multiplier += 1
+                        corrected_order_price = base_order_price + \
+                            increment if side == 'sell' else base_order_price - increment
+                        corrected_order_price = round_to_increment(
+                            corrected_order_price, increment_string)
 
-                order_price = corrected_order_price
+                    order_price = corrected_order_price
 
-                percentage_diff = 100 * \
-                    (order_price - wanted_price) / wanted_price
+                    percentage_diff = 100 * \
+                        (order_price - wanted_price) / wanted_price
 
-                try_it = True
+                    try_it = True
 
-                if side == 'sell' and percentage_diff < -PERCENTAGE_THRESHOLD:
-                    try_it = False
-                if side == 'buy' and percentage_diff > PERCENTAGE_THRESHOLD:
-                    try_it = False
+                    if side == 'sell' and percentage_diff < -PERCENTAGE_THRESHOLD:
+                        try_it = False
+                    elif side == 'buy' and percentage_diff > PERCENTAGE_THRESHOLD:
+                        try_it = False
 
-                limit_order = {
-                    'base_order': order,
-                    'ticker': ticker,
-                    'order_price': order_price,
-                    'base_order_price': base_order_price,
-                    'corrected_order_price': corrected_order_price,
-                    'increment_multiplier': increment_multiplier,
-                    'percentage_diff': percentage_diff,
-                    'try_it': try_it
-                }
+                    limit_order = {
+                        'base_order': order,
+                        'ticker': ticker,
+                        'order_price': order_price,
+                        'base_order_price': base_order_price,
+                        'corrected_order_price': corrected_order_price,
+                        'increment_multiplier': increment_multiplier,
+                        'percentage_diff': percentage_diff,
+                        'try_it': try_it
+                    }
+                    limit_orders.append(limit_order)
 
-                if args.do_it:
-                    if try_it:
-                        # note: can throw with copra.rest.client.APIRequestError: Post only mode [400]
-                        # if price has changed fast
+                    if args.do_it and try_it:
                         try:
-                            response = await rest_client.limit_order(
-                                side, product_id, order_price, size,
-                                time_in_force='GTT', cancel_after='day',
-                                post_only=True)
-                            limit_order['submit_response'] = response
-                            limit_order['query_responses'] = []
-                            limit_order['done'] = False
-                            logging.info(response)
+                            response = await exchange.limit_order(
+                                side, product_id, order_price, size)
+
+                            if response:
+                                limit_order['submit_response'] = response
+                                limit_order['query_responses'] = []
+                                limit_order['done'] = False
+                                logging.info(response)
+                                success = True
                         except Exception as e:
                             logging.error(e)
                             logging.info(order_price)
                             logging.info(quote_increment)
-
-                limit_orders.append(limit_order)
+                    else:
+                        success = True  # Leave the loop
 
             submitted_count = len(
                 [order for order in limit_orders if 'submit_response' in order])
@@ -315,8 +484,8 @@ async def main():
                     for order in limit_orders:
                         if order['try_it'] and not order['done']:
                             id = order['submit_response']['id']
-                            try:
-                                response = await rest_client.get_order(id)
+                            response = await exchange.get_order(id)
+                            if response:
                                 if len(order['query_responses']) == 0 or order['query_responses'][-1] != response:
                                     order['query_responses'].append(
                                         response)
@@ -324,17 +493,11 @@ async def main():
                                     logging.info(f'{id} executed')
                                     order['done'] = True
                                     executed_count += 1
-                            except APIRequestError as e:
-                                if e.response.status == 404:
-                                    # NotFound: order has been cancelled, we should repost it
-                                    logging.info(f'{id} canceled')
-                                    order['done'] = True
-                                    order['error'] = True
-                                    executed_count += 1
-                                else:
-                                    logging.error(
-                                        f'order {id} error : {e}')
-                                    raise e
+                            else:
+                                logging.info(f'{id} canceled')
+                                order['done'] = True
+                                order['error'] = True
+                                executed_count += 1
                     epoch += 1
                     await asyncio.sleep(1)
 
@@ -424,13 +587,13 @@ def compute_allocations(prices, portfolio):
     }
 
 
-async def get_portfolio(rest_client):
-    accounts = await rest_client.accounts()
+async def get_portfolio(exchange):
+    accounts = await exchange.accounts()
     return {item['currency']: item['balance']
             for item in accounts if float(item['balance']) != 0}
 
 
-async def get_prices_dict(rest_client, portfolio, quote_currency, product_ids):
+async def get_prices_dict(exchange, portfolio, quote_currency, product_ids):
     prices = {}
     for base_currency in portfolio:
         await asyncio.sleep(0.2)
@@ -439,11 +602,11 @@ async def get_prices_dict(rest_client, portfolio, quote_currency, product_ids):
             continue
         wanted_product_id = f'{base_currency}-{quote_currency}'
         if wanted_product_id in product_ids:
-            prices[base_currency] = float((await rest_client.ticker(wanted_product_id))['price'])
+            prices[base_currency] = float((await exchange.ticker(wanted_product_id))['price'])
             continue
         reverse_product_id = f'{quote_currency}-{base_currency}'
         if reverse_product_id in product_ids:
-            price_of_quote_in_base = float((await rest_client.ticker(reverse_product_id))['price'])
+            price_of_quote_in_base = float((await exchange.ticker(reverse_product_id))['price'])
             price_of_base_in_quote = 1.0 / price_of_quote_in_base
             prices[base_currency] = price_of_base_in_quote
             continue
@@ -454,13 +617,13 @@ async def get_prices_dict(rest_client, portfolio, quote_currency, product_ids):
 
         btc_product_id = f'{base_currency}-BTC'
         if btc_product_id in product_ids:
-            btc_price = float((await rest_client.ticker(btc_product_id))['price'])
+            btc_price = float((await exchange.ticker(btc_product_id))['price'])
         else:
             btc_product_id = f'BTC-{base_currency}'
-            btc_price = 1.0 / float((await rest_client.ticker(btc_product_id))['price'])
+            btc_price = 1.0 / float((await exchange.ticker(btc_product_id))['price'])
 
         base_product_id = f'BTC-{quote_currency}'
-        base_price = float((await rest_client.ticker(base_product_id))['price'])
+        base_price = float((await exchange.ticker(base_product_id))['price'])
 
         prices[base_currency] = base_price * btc_price
     return prices
