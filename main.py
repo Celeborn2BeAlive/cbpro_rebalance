@@ -205,7 +205,7 @@ class FreezedStateExchange():
             executed_value = float(order['size']) * float(order['price'])
             order['executed_value'] = str(executed_value)
             maker_fee_rate = float(self.config['fees']['maker_fee_rate'])
-            order['fill_fees'] = maker_fee_rate * float(executed_value)
+            order['fill_fees'] = str(maker_fee_rate * float(executed_value))
             order['status'] = 'done'
             order['settled'] = True
             return order
@@ -296,6 +296,25 @@ async def main():
             with open(args.target_allocations) as f:
                 target_allocations = json.load(f)
 
+            total_target_alloc = 0
+            for c in target_allocations:
+                total_target_alloc += float(target_allocations[c])
+            for c in target_allocations:
+                target_allocations[c] = float(
+                    target_allocations[c]) / total_target_alloc
+
+            exchange_portfolio = await get_portfolio(exchange)
+            for currency in portfolio:
+                amount = float(portfolio[currency])
+                exchange_amount = float(
+                    exchange_portfolio[currency]) if currency in exchange_portfolio else 0
+                if amount > exchange_amount:
+                    logging.error(
+                        f'Invalid portfolio: not enough {currency} on the exchange (asking for {amount}, having {exchange_amount} on the exchange)')
+                    exit(-1)
+                if amount < 0:  # each amount < 0 in the portfolio mean we want to take the maximum possible quantity, we replace with the exchange amount
+                    portfolio[currency] = exchange_portfolio[currency]
+
             output = {}
 
             output['portfolio'] = portfolio
@@ -304,8 +323,17 @@ async def main():
             SWAP_CURRENCY = 'BTC'
             output['swap_currency'] = SWAP_CURRENCY
 
+            for c in target_allocations:
+                if not c in portfolio:
+                    portfolio[c] = "0.0"
+
             prices = await get_prices_dict(exchange, portfolio, SWAP_CURRENCY, product_ids)
             allocations = compute_allocations(prices, portfolio)
+
+            diff_allocs_perc = {}
+            for c in target_allocations:
+                diff_allocs_perc[c] = 100 * (
+                    target_allocations[c] - allocations['allocations'][c]) / allocations['allocations'][c] if allocations['allocations'][c] > 0.0 else 100.0
 
             output['prices'] = prices
             output['allocations'] = allocations
@@ -419,6 +447,23 @@ async def main():
 
             output['ruled_size_to_sell'] = ruled_size_to_sell
 
+            for c in ruled_size_to_sell:
+                if ruled_size_to_sell[c] == 0.0:
+                    diff_allocs_perc[c] = 0.0
+
+            output['diff_alloc_percentage'] = diff_allocs_perc
+
+            max_diff_allocs_perc = 0
+            for c in diff_allocs_perc:
+                max_diff_allocs_perc = max(
+                    max_diff_allocs_perc, diff_allocs_perc[c])
+
+            if max_diff_allocs_perc < args.rebalance_threshold:
+                logging.info(
+                    f'Max allocation difference is {max_diff_allocs_perc} % while threshold is {args.rebalance_threshold}: no rebalance needed.')
+                json_output(output)
+                return
+
             # todo: this should be proportional to increment / current_price, for example EOS-BTC was at 0.277% of increment at test time
             PERCENTAGE_THRESHOLD = 0.5
             output['percentage_treshold'] = PERCENTAGE_THRESHOLD
@@ -432,76 +477,76 @@ async def main():
 
             limit_orders = []
             for order in orders:
-                success = False
-                trial_count = 0
-                while not success and trial_count < MAX_LIMIT_ORDER_TRIAL_COUNT:
-                    trial_count += 1
-                    product_id = order['product_id']
-                    side = order['side']
-                    size = order['size']
-                    wanted_price = order['wanted_price']
+                product_id = order['product_id']
+                side = order['side']
+                size = order['size']
+                wanted_price = order['wanted_price']
 
-                    increment_string = product_ids[product_id]['quote_increment']
-                    quote_increment = float(increment_string)
+                increment_string = product_ids[product_id]['quote_increment']
+                quote_increment = float(increment_string)
 
-                    ticker = await exchange.ticker(product_id)
+                ticker = await exchange.ticker(product_id)
 
-                    base_order_price = float(
-                        ticker['bid']) if side == 'sell' else float(ticker['ask'])
+                base_order_price = float(
+                    ticker['bid']) if side == 'sell' else float(ticker['ask'])
 
-                    corrected_order_price = base_order_price
-                    increment_multiplier = 1
+                corrected_order_price = base_order_price
+                increment_multiplier = 1
 
-                    while corrected_order_price == base_order_price:
-                        increment = increment_multiplier * quote_increment
-                        increment_multiplier += 1
-                        corrected_order_price = base_order_price + \
-                            increment if side == 'sell' else base_order_price - increment
-                        corrected_order_price = round_to_increment(
-                            corrected_order_price, increment_string)
+                while corrected_order_price == base_order_price:
+                    increment = increment_multiplier * quote_increment
+                    increment_multiplier += 1
+                    corrected_order_price = base_order_price + \
+                        increment if side == 'sell' else base_order_price - increment
+                    corrected_order_price = round_to_increment(
+                        corrected_order_price, increment_string)
 
-                    order_price = corrected_order_price
+                order_price = corrected_order_price
 
-                    percentage_diff = 100 * \
-                        (order_price - wanted_price) / wanted_price
+                percentage_diff = 100 * \
+                    (order_price - wanted_price) / wanted_price
 
-                    try_it = True
+                try_it = True
 
-                    if side == 'sell' and percentage_diff < -PERCENTAGE_THRESHOLD:
-                        try_it = False
-                    elif side == 'buy' and percentage_diff > PERCENTAGE_THRESHOLD:
-                        try_it = False
+                if side == 'sell' and percentage_diff < -PERCENTAGE_THRESHOLD:
+                    try_it = False
+                elif side == 'buy' and percentage_diff > PERCENTAGE_THRESHOLD:
+                    try_it = False
 
-                    limit_order = {
-                        'base_order': order,
-                        'ticker': ticker,
-                        'order_price': order_price,
-                        'base_order_price': base_order_price,
-                        'corrected_order_price': corrected_order_price,
-                        'increment_multiplier': increment_multiplier,
-                        'percentage_diff': percentage_diff,
-                        'try_it': try_it
-                    }
-                    limit_orders.append(limit_order)
+                limit_order = {
+                    'base_order': order,
+                    'ticker': ticker,
+                    'order_price': order_price,
+                    'base_order_price': base_order_price,
+                    'corrected_order_price': corrected_order_price,
+                    'increment_multiplier': increment_multiplier,
+                    'percentage_diff': percentage_diff,
+                    'try_it': try_it,
+                    'done': False,
+                    'submit_response': None,
+                    'query_responses': []
+                }
+                limit_orders.append(limit_order)
 
-                    if args.do_it and try_it:
-                        try:
-                            response = await exchange.limit_order(
-                                side, product_id, order_price, size)
-
-                            if response:
-                                limit_order['submit_response'] = response
-                                limit_order['query_responses'] = []
-                                limit_order['done'] = False
-                                logging.info(response)
-                                success = True
-                        except Exception as e:
-                            logging.error(e)
-                            logging.info(order_price)
-                            logging.info(quote_increment)
-                            raise e
-                    else:
-                        success = True  # Leave the loop
+            if args.do_it:
+                for limit_order in limit_orders:
+                    if limit_order['try_it']:
+                        success = False
+                        trial_count = 0
+                        while not success and trial_count < MAX_LIMIT_ORDER_TRIAL_COUNT:
+                            trial_count += 1
+                            try:
+                                response = await exchange.limit_order(
+                                    side, product_id, order_price, size)
+                                if response:
+                                    limit_order['submit_response'] = response
+                                    logging.info(response)
+                                    success = True
+                            except Exception as e:
+                                logging.error(e)
+                                logging.info(order_price)
+                                logging.info(quote_increment)
+                                raise e
 
             submitted_count = len(
                 [order for order in limit_orders if 'submit_response' in order])
@@ -524,6 +569,7 @@ async def main():
                                         response)
                                 if response['status'] == 'done':
                                     logging.info(f'{id} executed')
+                                    # #todo compute new portfolio
                                     order['done'] = True
                                     executed_count += 1
                             else:
@@ -600,7 +646,7 @@ def compute_allocations(prices, portfolio):
     values = {}
     float_prices = {}
     float_amount = {}
-    for base_currency in prices:
+    for base_currency in portfolio:
         price = float(prices[base_currency])
         float_prices[base_currency] = price
         amount = float(portfolio[base_currency])
@@ -690,6 +736,8 @@ def parse_cli_args():
 
     parser = argparse.ArgumentParser(description='Desc')
     parser.add_argument('-l', '--log-file', help='Path to log file.')
+    parser.add_argument('--rebalance-threshold',
+                        type=float, default=0.0, help='Threshold to trigger rebalancing')
     parser.add_argument(
         '--exchange-type', required=True, help='Type of exchange among "freezed, backtest, live"'
     )
