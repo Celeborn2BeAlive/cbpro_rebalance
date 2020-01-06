@@ -237,7 +237,7 @@ def make_exchange(args):
 MAX_LIMIT_ORDER_TRIAL_COUNT = 5
 
 
-async def get_freezed_state_exchange_config(exchange):
+async def get_freezed_state_exchange_config_cmd(exchange):
     output_dict = {
         'time': await exchange.time(),
         'products': await exchange.products(),
@@ -251,14 +251,21 @@ async def get_freezed_state_exchange_config(exchange):
     return output_dict
 
 
+async def get_portfolio_cmd(exchange):
+    return {'time': await exchange.time(), 'portfolio': await get_portfolio(exchange)}
+
+
 async def main():
     args, args_parser = parse_cli_args()
     init_logging(args)
 
     async with make_exchange(args) as exchange:
         if args.action == 'get-freezed-state-exchange-config':
-            output_dict = get_freezed_state_exchange_config(exchange)
-            json_output(output_dict, args.out)
+            json_output(await get_freezed_state_exchange_config_cmd(exchange), args.out)
+            return
+        
+        if args.action == 'get-portfolio':
+            json_output(await get_portfolio_cmd(exchange), args.out)
             return
 
         time_str = await exchange.time()
@@ -267,10 +274,6 @@ async def main():
         product_ids = {p['id']: p for p in products}
 
         QUOTE_CURRENCY = 'EUR'
-
-        if args.action == 'get-portfolio':
-            json_output({'time': time_str, 'portfolio': await get_portfolio(exchange)}, args.out)
-            return
 
         if args.action == 'get-allocations':
             with open(args.portfolio) as f:

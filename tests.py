@@ -2,7 +2,10 @@ import unittest
 import json
 import pprint
 import asyncio
-from main import make_exchange, get_freezed_state_exchange_config
+from main import make_exchange, get_freezed_state_exchange_config_cmd, get_portfolio_cmd
+
+# Todo: instead of testing functions from main.py, we should directly test the output of the program
+# Ideally tests should be specified in a json file
 
 
 class Args:
@@ -22,14 +25,19 @@ class TestConfig1(unittest.TestCase):
 
     def test_freezed_config(self):
         async def go():
-            freezed_config = await get_freezed_state_exchange_config(self.exchange)
+            result = await get_freezed_state_exchange_config_cmd(self.exchange)
             with open(self.config_file, 'r') as f:
-                file_config = json.load(f)
-            self.assertEqual(freezed_config, file_config)
+                expected_result = json.load(f)
+            self.assertEqual(result, expected_result)
         self.loop.run_until_complete(go())
 
     def test_portfolio(self):
-        pass
+        async def go():
+            result = await get_portfolio_cmd(self.exchange)
+            with open(self.portfolio_file, 'r') as f:
+                expected_result = json.load(f)
+            self.assertEqual(result, expected_result)
+        self.loop.run_until_complete(go())
 
 
 if __name__ == '__main__':
