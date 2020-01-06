@@ -151,6 +151,9 @@ class CoinbaseExchange():
     async def fees(self):
         return await self.client_request(self.rest_client.fees)
 
+    async def time(self):
+        return datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+
 
 class FreezedStateExchange():
     def __init__(self, config: dict):
@@ -217,6 +220,9 @@ class FreezedStateExchange():
     async def fees(self):
         return self.config['fees']
 
+    async def time(self):
+        return self.config['time']
+
 
 def make_exchange(args):
     with open(args.config, 'r') as f:
@@ -231,31 +237,36 @@ def make_exchange(args):
 MAX_LIMIT_ORDER_TRIAL_COUNT = 5
 
 
+async def get_freezed_state_exchange_config(exchange):
+    output_dict = {
+        'time': await exchange.time(),
+        'products': await exchange.products(),
+        'accounts': await exchange.accounts(),
+        'fees': await exchange.fees(),
+        'tickers': {}
+    }
+    product_ids = {p['id']: p for p in output_dict['products']}
+    for p in product_ids:
+        output_dict['tickers'][p] = await exchange.ticker(p)
+    return output_dict
+
+
 async def main():
     args, args_parser = parse_cli_args()
     init_logging(args)
 
     async with make_exchange(args) as exchange:
+        if args.action == 'get-freezed-state-exchange-config':
+            output_dict = get_freezed_state_exchange_config(exchange)
+            json_output(output_dict, args.out)
+            return
+
+        time_str = await exchange.time()
+
         products = await exchange.products()
         product_ids = {p['id']: p for p in products}
 
         QUOTE_CURRENCY = 'EUR'
-
-        time = datetime.now()
-        time_str = time.strftime('%Y-%m-%d-%H:%M:%S')
-
-        if args.action == 'get-freezed-state-exchange-config':
-            output_dict = {
-                'time': time_str,
-                'products': products,
-                'accounts': await exchange.accounts(),
-                'fees': await exchange.fees(),
-                'tickers': {}
-            }
-            for p in product_ids:
-                output_dict['tickers'][p] = await exchange.ticker(p)
-            json_output(output_dict, args.out)
-            return
 
         if args.action == 'get-portfolio':
             json_output({'time': time_str, 'portfolio': await get_portfolio(exchange)}, args.out)
@@ -777,67 +788,6 @@ def parse_cli_args():
     command_parser.add_argument('-o', '--out', help='Output json file')
 
     return parser.parse_args(), parser
-
-
-"""An efficient algorithm to find shortest paths between nodes in a graph."""
-
-
-class Digraph(object):
-    def __init__(self, nodes=[]):
-        self.nodes = set()
-        self.neighbours = defaultdict(set)
-        self.dist = {}
-
-    def addNode(self, *nodes):
-        [self.nodes.add(n) for n in nodes]
-
-    def addEdge(self, frm, to, d=1e309):
-        self.addNode(frm, to)
-        self.neighbours[frm].add(to)
-        self.dist[frm, to] = d
-
-    def dijkstra(self, start, maxD=1e309):
-        """Returns a map of nodes to distance from start and a map of nodes to
-        the neighbouring node that is closest to start."""
-        # total distance from origin
-        tdist = defaultdict(lambda: 1e309)
-        tdist[start] = 0
-        # neighbour that is nearest to the origin
-        preceding_node = {}
-        unvisited = self.nodes
-
-        while unvisited:
-            current = unvisited.intersection(tdist.keys())
-            if not current:
-                break
-            min_node = min(current, key=tdist.get)
-            unvisited.remove(min_node)
-
-            for neighbour in self.neighbours[min_node]:
-                d = tdist[min_node] + self.dist[min_node, neighbour]
-                if tdist[neighbour] > d and maxD >= d:
-                    tdist[neighbour] = d
-                    preceding_node[neighbour] = min_node
-
-        return tdist, preceding_node
-
-    def min_path(self, start, end, maxD=1e309):
-        """Returns the minimum distance and path from start to end."""
-        tdist, preceding_node = self.dijkstra(start, maxD)
-        dist = tdist[end]
-        backpath = [end]
-        try:
-            while end != start:
-                end = preceding_node[end]
-                backpath.append(end)
-            path = list(reversed(backpath))
-        except KeyError:
-            path = None
-
-        return dist, path
-
-    def dist_to(self, *args): return self.min_path(*args)[0]
-    def path_to(self, *args): return self.min_path(*args)[1]
 
 
 if __name__ == "__main__":
