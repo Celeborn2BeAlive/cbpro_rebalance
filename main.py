@@ -255,17 +255,41 @@ async def get_portfolio_cmd(exchange):
     return {'time': await exchange.time(), 'portfolio': await get_portfolio(exchange)}
 
 
+async def get_allocations_cmd(exchange, args):
+    products = await exchange.products()
+    product_ids = {p['id']: p for p in products}
+    with open(args.portfolio) as f:
+        portfolio = json.load(f)['portfolio']
+        prices = await get_prices_dict(exchange, portfolio, 'EUR', product_ids)
+        prices_btc = await get_prices_dict(exchange, portfolio, 'BTC', product_ids)
+
+        allocations = compute_allocations(prices, portfolio)
+        allocations_btc = compute_allocations(prices_btc, portfolio)
+
+        return {
+            'time': await exchange.time(),
+            'allocations': {
+                'EUR': allocations,
+                'BTC': allocations_btc
+            }
+        }
+
+
 async def main():
     args, args_parser = parse_cli_args()
     init_logging(args)
 
     async with make_exchange(args) as exchange:
-        if args.action == 'get-freezed-state-exchange-config':
+        if args.action == 'freeze':
             json_output(await get_freezed_state_exchange_config_cmd(exchange), args.out)
             return
-        
+
         if args.action == 'get-portfolio':
             json_output(await get_portfolio_cmd(exchange), args.out)
+            return
+
+        if args.action == 'get-allocations':
+            json_output(await get_allocations_cmd(exchange, args), args.out)
             return
 
         time_str = await exchange.time()
@@ -275,30 +299,13 @@ async def main():
 
         QUOTE_CURRENCY = 'EUR'
 
-        if args.action == 'get-allocations':
-            with open(args.portfolio) as f:
-                portfolio = json.load(f)['portfolio']
-            prices = await get_prices_dict(exchange, portfolio, QUOTE_CURRENCY, product_ids)
-            prices_btc = await get_prices_dict(exchange, portfolio, 'BTC', product_ids)
-
-            allocations = compute_allocations(prices, portfolio)
-            allocations_btc = compute_allocations(prices_btc, portfolio)
-
-            json_output({
-                'time': time_str,
-                'allocations': allocations,
-                'allocations_btc': allocations_btc
-            }, args.out)
-
-            return
-
         if args.action == 'get-target-allocations':
             with open(args.portfolio) as f:
                 portfolio = json.load(f)
 
             if args.method == 'equidistrib':
                 json_output(compute_equidistrib_allocations(
-                    portfolio, set([QUOTE_CURRENCY])), args.out)
+                    portfolio['portfolio'], set([QUOTE_CURRENCY])), args.out)
             else:
                 logging.error("Only 'equidistrib' is supported for now")
 
@@ -764,7 +771,7 @@ def parse_cli_args():
     command_parser = commands.add_parser('get-portfolio')
     command_parser.add_argument('-o', '--out', help='Output json file')
 
-    command_parser = commands.add_parser('get-freezed-state-exchange-config')
+    command_parser = commands.add_parser('freeze')
     command_parser.add_argument('-o', '--out', help='Output json file')
 
     command_parser = commands.add_parser('get-allocations')
