@@ -3,7 +3,7 @@ import json
 import subprocess
 import logging
 import pprint
-
+import sys
 
 class Tests20191215(unittest.TestCase):
     def setUp(self):
@@ -11,7 +11,7 @@ class Tests20191215(unittest.TestCase):
         self.portfolio_file = 'test-data/portfolio-2019-12-15.json'
         self.allocations_file = 'test-data/allocations-2019-12-15.json'
 
-        self.base_args = ['python', 'main.py', '--config', self.config_file,
+        self.base_args = [sys.executable, 'main.py', '--config', self.config_file,
                           '--exchange-type', 'freezed']
 
     def run_test(self, args, expected_result_file, use_logging=False):
