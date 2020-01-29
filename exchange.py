@@ -23,7 +23,7 @@ class CoinbaseExchange():
     async def __aexit__(self, *args):
         await self.rest_client.close()
 
-    async def client_request(self, function, *args):
+    async def client_request(self, function, *args, **kwargs):
         current_time = time.time()
         elapsed_time = current_time - self.previous_request_time
         if elapsed_time < COINBASE_TIME_TO_SLEEP:
@@ -32,7 +32,7 @@ class CoinbaseExchange():
         while trials_count < COINBASE_MAX_REQUEST_TRIALS_COUNT:
             trials_count += 1
             try:
-                result = await function(*args)
+                result = await function(*args, **kwargs)
                 self.previous_request_time = current_time
                 return result
             except APIRequestError as e:
