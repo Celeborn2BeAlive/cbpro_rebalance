@@ -458,6 +458,7 @@ async def main():
                             response = await exchange.get_order(id)
                             if response:
                                 if len(order['query_responses']) == 0 or order['query_responses'][-1] != response:
+                                    response['time'] = await exchange.time()
                                     order['query_responses'].append(
                                         response)
                                 if response['status'] == 'done':
