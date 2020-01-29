@@ -86,6 +86,8 @@ from exchange import make_exchange
 #     "status": "done",
 #     "settled": true
 # }
+#
+# Note about filled_size: according to my tests, it increment until reaching the size of the order
 
 MAX_LIMIT_ORDER_TRIAL_COUNT = 5
 
