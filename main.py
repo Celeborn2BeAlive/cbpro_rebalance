@@ -413,11 +413,19 @@ async def main():
             if args.do_it:
                 for limit_order in limit_orders:
                     if limit_order['try_it']:
+                        order = limit_order['base_order']
+                        product_id = order['product_id']
+                        side = order['side']
+                        size = order['size']
+                        order_price = limit_order['corrected_order_price']
+
                         success = False
                         trial_count = 0
                         while not success and trial_count < MAX_LIMIT_ORDER_TRIAL_COUNT:
                             trial_count += 1
                             try:
+                                logging.info(
+                                    f'Submitting order {side} {product_id} {order_price} {size}')
                                 response = await exchange.limit_order(
                                     side, product_id, order_price, size)
                                 if response:
@@ -610,6 +618,7 @@ def init_logging(args):
         logging.basicConfig(
             format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
         logging.info('Logging to error output')
+    logging.getLogger().setLevel(logging.INFO)
 
 
 def parse_cli_args():
