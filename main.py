@@ -375,6 +375,45 @@ async def main():
                 base_order_price = float(
                     ticker['bid']) if side == 'sell' else float(ticker['ask'])
 
+                total_order_price = base_order_price * size
+                base_currency, quote_currency = product_id.split(
+                    '-')[0], product_id.split('-')[1]
+
+                # Safety check
+                if side == 'buy':
+                    # Cannot spend more than our quantity of quote currency
+                    if total_order_price > allocations['portfolio'][quote_currency]:
+                        logging.info(
+                            f'Trying to buy {size} {base_currency} for {base_order_price} for a total of {total_order_price} {quote_currency}.')
+                        logging.info(
+                            f'But you only have {allocations["portfolio"][quote_currency]} {quote_currency}.')
+
+                        size = 0.995 * allocations['portfolio'][quote_currency] / \
+                            base_order_price
+
+                        product = product_ids[product_id]
+                        size = round_to_increment(
+                            size, product['base_increment'])
+
+                        min_size = float(product['base_min_size'])
+                        max_size = float(product['base_max_size'])
+                        if size < min_size:
+                            size = 0
+                        elif size > max_size:
+                            size = max_size
+
+                        ruled_size_to_sell[currency] = size
+
+                        order['size'] = size
+
+                        total_order_price = base_order_price * size
+                        logging.info(
+                            f'Changing for: buy {size} {base_currency} for {base_order_price} for a total of {total_order_price} {quote_currency}.')
+                elif side == 'sell':
+                    # Cannot sell more that our quantity of base currency (this one should not happen)
+                    if size > allocations['portfolio'][base_currency]:
+                        size = allocations['portfolio'][base_currency]
+
                 corrected_order_price = base_order_price
                 increment_multiplier = 1
 
@@ -457,7 +496,11 @@ async def main():
                             id = order['submit_response']['id']
                             response = await exchange.get_order(id)
                             if response:
-                                if len(order['query_responses']) == 0 or order['query_responses'][-1] != response:
+                                previous_response = None
+                                if len(order['query_responses']) > 0:
+                                    previous_response = order['query_responses'][-1].copy()
+                                    del previous_response['time']
+                                if len(order['query_responses']) == 0 or previous_response != response:
                                     response['time'] = await exchange.time()
                                     order['query_responses'].append(
                                         response)
