@@ -14,6 +14,9 @@ from exchange import make_exchange
 # - * loop on previous portfolio to implement hourly rebalance with threshold based rebalancing
 # - * Compute portfolio values in fiat currency (each line and the total)
 # - * Cancel all orders if errors
+# - * more logging during trading (about wanted price vs corrected price)
+# - * buy BTC orders first (or sell for BTC), then buy others orders (it not enough BTC in wallet to handle rebalance)
+# - * test if product is "limit_only": true; if not use market order
 
 # - handle buying of new assets (right now we can only buy/sell assets from the portfolio)
 # - better computation of threshold on percentage diff (should depend on increment and current price)
