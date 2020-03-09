@@ -178,6 +178,9 @@ async def main():
         QUOTE_CURRENCY = 'EUR'
 
         if args.action == 'get-orders':
+            fees = await exchange.fees()
+            taker_fees = float(fees['taker_fee_rate'])
+
             with open(args.portfolio) as f:
                 portfolio = json.load(f)['portfolio']
             with open(args.target_allocations) as f:
@@ -216,6 +219,13 @@ async def main():
 
             prices = await get_prices_dict(exchange, portfolio, SWAP_CURRENCY, product_ids)
             allocations = compute_allocations(prices, portfolio)
+
+            # todo dirty: patch for copra.rest.client.APIRequestError: Insufficient funds [400]
+            new_EUR_alloc = int(
+                allocations['portfolio']['EUR'] * 10) / 10
+            logging.info(
+                f"Patching EUR allocation {(allocations['portfolio']['EUR'])} to {new_EUR_alloc} to avoid errors.")
+            allocations['portfolio']['EUR'] = new_EUR_alloc
 
             diff_allocs_perc = {}
             for c in target_allocations:
@@ -378,6 +388,8 @@ async def main():
                     ticker['bid']) if side == 'sell' else float(ticker['ask'])
 
                 total_order_price = base_order_price * size
+                order_fees = total_order_price * taker_fees
+                total_order_price += order_fees
                 base_currency, quote_currency = product_id.split(
                     '-')[0], product_id.split('-')[1]
 
@@ -445,6 +457,7 @@ async def main():
                     'order_price': order_price,
                     'base_order_price': base_order_price,
                     'corrected_order_price': corrected_order_price,
+                    'order_fees': order_fees,
                     'increment_multiplier': increment_multiplier,
                     'percentage_diff': percentage_diff,
                     'try_it': try_it,
@@ -469,7 +482,7 @@ async def main():
                             trial_count += 1
                             try:
                                 logging.info(
-                                    f'Submitting order {side} {product_id} {order_price} {size}')
+                                    f'Submitting order {side} {product_id} {order_price} {size} (total = {(order_price * size)})')
                                 response = await exchange.limit_order(
                                     side, product_id, order_price, size)
                                 if response:
@@ -480,7 +493,7 @@ async def main():
                                 logging.error(e)
                                 logging.info(order_price)
                                 logging.info(quote_increment)
-                                raise e
+                                exit(-1)
 
             submitted_count = len(
                 [order for order in limit_orders if 'submit_response' in order])
