@@ -8,6 +8,12 @@ from datetime import datetime, timedelta
 
 from exchange import make_exchange
 
+# WHAT NEEDS TO BE FIXED BECAUSE IT IS HARD TO DEAL WITH !!
+# - If error, orders is not written
+# - I need a true log file as well as the json
+# - It is doing to much things -> we should just output orders in a file
+# - Then this file is read and executed
+
 # TODO
 # - * watch and repost orders when they are cancelled
 # - * new portfolio computation based on executed orders
@@ -107,8 +113,8 @@ async def get_freezed_state_exchange_config_cmd(exchange):
     return output_dict
 
 
-async def get_portfolio_cmd(exchange):
-    return {'time': await exchange.time(), 'portfolio': await get_portfolio(exchange)}
+async def get_portfolio_cmd(exchange, args):
+    return {'time': await exchange.time(), 'portfolio': await get_portfolio(exchange, args.exclude)}
 
 
 async def get_allocations_cmd(exchange, args):
@@ -159,7 +165,7 @@ async def main():
             return
 
         if args.action == 'get-portfolio':
-            json_output(await get_portfolio_cmd(exchange), args.out)
+            json_output(await get_portfolio_cmd(exchange, args), args.out)
             return
 
         if args.action == 'get-allocations':
@@ -193,7 +199,7 @@ async def main():
                 target_allocations[c] = float(
                     target_allocations[c]) / total_target_alloc
 
-            exchange_portfolio = await get_portfolio(exchange)
+            exchange_portfolio = await get_portfolio(exchange, [])
             for currency in portfolio:
                 amount = float(portfolio[currency])
                 exchange_amount = float(
@@ -493,7 +499,6 @@ async def main():
                                 logging.error(e)
                                 logging.info(order_price)
                                 logging.info(quote_increment)
-                                exit(-1)
 
             submitted_count = len(
                 [order for order in limit_orders if 'submit_response' in order])
@@ -618,9 +623,9 @@ def compute_allocations(prices, portfolio):
     }
 
 
-async def get_portfolio(exchange):
+async def get_portfolio(exchange, exclude_symbols):
     accounts = await exchange.accounts()
-    return {item['currency']: item['balance']
+    return {item['currency']: item['balance'] if not item['currency'] in exclude_symbols else "0"
             for item in accounts if float(item['balance']) != 0}
 
 
@@ -702,6 +707,8 @@ def parse_cli_args():
 
     command_parser = commands.add_parser('get-portfolio')
     command_parser.add_argument('-o', '--out', help='Output json file')
+    command_parser.add_argument(
+        '--exclude', type=parse_string_list, default=[], help='What currencies to exclude (comma separated list)')
 
     command_parser = commands.add_parser('freeze')
     command_parser.add_argument('-o', '--out', help='Output json file')

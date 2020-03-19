@@ -55,7 +55,7 @@ class CoinbaseExchange():
             return await self.client_request(self.rest_client.limit_order,
                                              side, product_id, order_price, size,
                                              time_in_force='GTT', cancel_after='hour',
-                                             post_only=True)
+                                             post_only=False)
         except APIRequestError as e:
             if e.response.status == 404:
                 # Post only mode [400]: order has been cancelled, we return None
