@@ -155,9 +155,23 @@ async def get_target_allocations_cmd(exchange, args):
         exit(1)
 
 
+async def change_portfolio_cmd(args):
+    with open(args.portfolio) as f:
+        d = json.load(f)
+        time = d['time']
+        portfolio = d['portfolio']
+    for currency, value in zip(args.currencies, args.values):
+        portfolio[currency] = str(value)
+    return {'time': time, 'portfolio': portfolio}
+
+
 async def main():
     args, args_parser = parse_cli_args()
     init_logging(args)
+
+    if args.action == 'change-portfolio':
+        json_output(await change_portfolio_cmd(args), args.out)
+        return
 
     async with make_exchange(args) as exchange:
         if args.action == 'freeze':
@@ -510,7 +524,7 @@ async def main():
 
                 while executed_count != submitted_count:
                     logging.info(
-                        f'Epoch {epoch} executed count = {executed_count}')
+                        f'Epoch {epoch} executed count = {executed_count} / {submitted_count}')
                     for order in limit_orders:
                         if order['try_it'] and not order['done']:
                             id = order['submit_response']['id']
@@ -692,15 +706,18 @@ def parse_cli_args():
     def parse_string_list(string):
         return string.split(',')
 
+    def parse_number_list(string):
+        return [float(i) for i in string.split(',')]
+
     parser = argparse.ArgumentParser(description='Desc')
     parser.add_argument('-l', '--log-file', help='Path to log file.')
     parser.add_argument('--rebalance-threshold',
                         type=float, default=0.0, help='Threshold to trigger rebalancing')
     parser.add_argument(
-        '--exchange-type', required=True, help='Type of exchange among "freezed, backtest, live"'
+        '--exchange-type', default="none", help='Type of exchange among "none, freezed, backtest, live"'
     )
     parser.add_argument(
-        '--config', required=True, help='Path to json file containing config for the specified exchange (apiKey, apiSecret, passPhrase) for live, freezed config for freezed')
+        '--config', help='Path to json file containing config for the specified exchange (apiKey, apiSecret, passPhrase) for live, freezed config for freezed')
 
     commands = parser.add_subparsers(
         title='commands', dest='action')
@@ -709,6 +726,15 @@ def parse_cli_args():
     command_parser.add_argument('-o', '--out', help='Output json file')
     command_parser.add_argument(
         '--exclude', type=parse_string_list, default=[], help='What currencies to exclude (comma separated list)')
+
+    command_parser = commands.add_parser('change-portfolio')
+    command_parser.add_argument(
+        'portfolio', help='Portfolio stored in json file. Can be obtained with get-portfolio command.')
+    command_parser.add_argument(
+        'currencies', type=parse_string_list, help='List of currencies to change')
+    command_parser.add_argument(
+        'values', type=parse_number_list, help='Values to set (for each currency)')
+    command_parser.add_argument('-o', '--out', help='Output json file')
 
     command_parser = commands.add_parser('freeze')
     command_parser.add_argument('-o', '--out', help='Output json file')
