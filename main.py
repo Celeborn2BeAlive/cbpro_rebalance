@@ -8,11 +8,25 @@ from datetime import datetime, timedelta
 
 from exchange import make_exchange
 
+# QUESTIONS THE SYSTEM NEED TO ANSWER
+# - What is the percentage of my portfolio in stable coins ? in EUR ? in stable + EUR ?
+# - What is the value of my portfolio at a given date ?
+#   - need the history
+# - Display evolution of allocations as curve, vs curve of each coin
+
+# - Display open orders
+# - Stop active watching -> send order and store states, one hour later rerun and check order states
+# - Display size in EUR on orders, + fees
+
+# - Need a simple watch system: exchange + currency + price + direction => mail + sms
+# - Or each day a report of the evolution of the portfolio ?
+
 # WHAT NEEDS TO BE FIXED BECAUSE IT IS HARD TO DEAL WITH !!
 # - If error, orders is not written
 # - I need a true log file as well as the json
 # - It is doing to much things -> we should just output orders in a file
 # - Then this file is read and executed
+# - Print link to market and order pages on coinbase pro
 
 # TODO
 # - * watch and repost orders when they are cancelled
